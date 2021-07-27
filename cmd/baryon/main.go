@@ -1,19 +1,24 @@
 package main
 
 import (
-	"Baryon/cmd/baryon/taskstore"
 	"encoding/json"
 	"fmt"
 	"log"
 	"mime"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gorilla/mux"
+
+	"Baryon/cmd/baryon/taskstore"
 )
 
 type taskServer struct {
+	sync.Mutex
+
 	store *taskstore.TaskStore
 }
 
@@ -44,15 +49,15 @@ func (ts *taskServer) taskHandler(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		id, err := strconv.Atoi(pathParts[1])
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		}
+		//id, err := strconv.Atoi(pathParts[1])
+		//if err != nil {
+		//	http.Error(w, err.Error(), http.StatusBadRequest)
+		//}
 
 		if req.Method == http.MethodDelete {
-			ts.deleteTaskHandler(w, req, id)
+			ts.deleteTaskHandler(w, req)
 		} else if req.Method == http.MethodGet {
-			ts.getTaskHandler(w, req, id)
+			ts.getTaskHandler(w, req)
 		} else {
 			http.Error(w, fmt.Sprintf("expected method GET or DELETE at /task/<id>, got %v", req.Method),
 				http.StatusMethodNotAllowed)
@@ -111,10 +116,15 @@ func (ts *taskServer) getAllTaskHandler(w http.ResponseWriter, req *http.Request
 	renderJSON(w, allTasks)
 }
 
-func (ts *taskServer) getTaskHandler(w http.ResponseWriter, req *http.Request, id int) {
+func (ts *taskServer) getTaskHandler(w http.ResponseWriter, req *http.Request) {
 	log.Printf("handling get task at %s\n", req.URL.Path)
 
+	id, _ := strconv.Atoi(mux.Vars(req)["id"])
+
+	ts.Lock()
 	task, err := ts.store.GetTask(id)
+	ts.Unlock()
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -123,8 +133,10 @@ func (ts *taskServer) getTaskHandler(w http.ResponseWriter, req *http.Request, i
 	renderJSON(w, task)
 }
 
-func (ts *taskServer) deleteTaskHandler(w http.ResponseWriter, req *http.Request, id int) {
+func (ts *taskServer) deleteTaskHandler(w http.ResponseWriter, req *http.Request) {
 	log.Printf("handling delete task at %s", req.URL.Path)
+
+	id, _ := strconv.Atoi(mux.Vars(req)["id"])
 
 	err := ts.store.DeleteTask(id)
 	if err != nil {
@@ -214,12 +226,16 @@ func renderJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func main() {
-	mux := http.NewServeMux()
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
 	server := NewTaskServer()
 
-	mux.HandleFunc("/task/", server.taskHandler)
-	mux.HandleFunc("/tag/", server.tagHandler)
-	mux.HandleFunc("/due/", server.dueHandler)
-
-	log.Fatal(http.ListenAndServe("localhost:"+os.Getenv("SERVERPORT"), mux))
+	router.HandleFunc("/task/", server.createTaskHandler).Methods("POST")
+	router.HandleFunc("/task/", server.getAllTaskHandler).Methods("GET")
+	router.HandleFunc("/task/", server.deleteAllTasksHandler).Methods("DELETE")
+	router.HandleFunc("/task/{id:[0-9]+}/", server.getTaskHandler).Methods("GET")
+	router.HandleFunc("/task/{id:[0-9]+}/", server.deleteTaskHandler).Methods("DELETE")
+	router.HandleFunc("/tag/{tag}", server.tagHandler).Methods("GET")
+	router.HandleFunc("/due/{year:[0-9]+}/{month:[0-9]+}/{day:[0-9]+}/", server.dueHandler).Methods("GET")
 }
