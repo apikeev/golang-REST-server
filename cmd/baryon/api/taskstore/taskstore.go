@@ -7,16 +7,18 @@ import (
 )
 
 type Task struct {
-	Id int `json:"id"`
-	Text string `json:"text"`
-	Tags []string `json:"tags"`
-	Due time.Time `json:"due"`
+	Id   int       `json:"id"`
+	Text string    `json:"text"`
+	Tags []string  `json:"tags"`
+	Due  time.Time `json:"due"`
 }
 
+// TaskStore is a simple in-memory database of tasks; TaskStore methods are
+// safe to call concurrently.
 type TaskStore struct {
 	sync.Mutex
 
-	tasks map[int]Task
+	tasks  map[int]Task
 	nextId int
 }
 
@@ -24,31 +26,28 @@ func New() *TaskStore {
 	ts := &TaskStore{}
 	ts.tasks = make(map[int]Task)
 	ts.nextId = 0
-
 	return ts
 }
 
-// CreateTask создает новую задачу и сохраняет её в хранилище TaskStore.tasks
+// CreateTask creates a new task in the store.
 func (ts *TaskStore) CreateTask(text string, tags []string, due time.Time) int {
 	ts.Lock()
 	defer ts.Unlock()
 
 	task := Task{
-		Id: ts.nextId,
+		Id:   ts.nextId,
 		Text: text,
-		Due: due,
-	}
+		Due:  due}
 	task.Tags = make([]string, len(tags))
 	copy(task.Tags, tags)
 
 	ts.tasks[ts.nextId] = task
 	ts.nextId++
-
 	return task.Id
 }
 
-// GetTask возвращает задачу с заданным ID
-// Если задачи с таким ID не существует - будет возвращена ошибка
+// GetTask retrieves a task from the store, by id. If no such id exists, an
+// error is returned.
 func (ts *TaskStore) GetTask(id int) (Task, error) {
 	ts.Lock()
 	defer ts.Unlock()
@@ -61,8 +60,8 @@ func (ts *TaskStore) GetTask(id int) (Task, error) {
 	}
 }
 
-// DeleteTask удаляет задачу с заданным ID
-// Если задачи с таким ID не существует - будет возвращена ошибка
+// DeleteTask deletes the task with the given id. If no such id exists, an error
+// is returned.
 func (ts *TaskStore) DeleteTask(id int) error {
 	ts.Lock()
 	defer ts.Unlock()
@@ -75,7 +74,7 @@ func (ts *TaskStore) DeleteTask(id int) error {
 	return nil
 }
 
-// DeleteAllTasks удаляет из хранилища все задачи
+// DeleteAllTasks deletes all tasks in the store.
 func (ts *TaskStore) DeleteAllTasks() error {
 	ts.Lock()
 	defer ts.Unlock()
@@ -84,6 +83,7 @@ func (ts *TaskStore) DeleteAllTasks() error {
 	return nil
 }
 
+// GetAllTasks returns all the tasks in the store, in arbitrary order.
 func (ts *TaskStore) GetAllTasks() []Task {
 	ts.Lock()
 	defer ts.Unlock()
@@ -92,13 +92,12 @@ func (ts *TaskStore) GetAllTasks() []Task {
 	for _, task := range ts.tasks {
 		allTasks = append(allTasks, task)
 	}
-
 	return allTasks
 }
 
-
-// GetTaskByTag возвращает задачи с заданным тегом
-func (ts *TaskStore) GetTaskByTag(tag string) []Task {
+// GetTasksByTag returns all the tasks that have the given tag, in arbitrary
+// order.
+func (ts *TaskStore) GetTasksByTag(tag string) []Task {
 	ts.Lock()
 	defer ts.Unlock()
 
@@ -113,12 +112,12 @@ taskloop:
 			}
 		}
 	}
-
 	return tasks
 }
 
-// GetTaskByDueDate возвращает задачи, которые запланированы на заданную дату
-func (ts *TaskStore) GetTaskByDueDate(year int, month time.Month, day int) []Task {
+// GetTasksByDueDate returns all the tasks that have the given due date, in
+// arbitrary order.
+func (ts *TaskStore) GetTasksByDueDate(year int, month time.Month, day int) []Task {
 	ts.Lock()
 	defer ts.Unlock()
 
