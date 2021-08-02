@@ -2,14 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
+	"mime"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
-
-	"Baryon/cmd/baryon/taskstore"
+	"Baryon/internal/taskstore"
+	"Baryon/internal/middleware"
 )
 
 type taskServer struct {
@@ -24,114 +28,181 @@ func NewTaskServer() *taskServer {
 	return &taskServer{store: store}
 }
 
-func (ts *taskServer) createTaskHandler(c *gin.Context) {
-	type RequestTask struct {
-		Text string `json:"text"`
-		Tags []string `json:"tags"`
-		Due time.Time `json:"due"`
-	}
-
-	var rt RequestTask
-	if err := c.ShouldBindJSON(&rt); err != nil {
-		c.String(http.StatusBadRequest, err.Error())
-	}
-
-	id := ts.store.CreateTask(rt.Text, rt.Tags, rt.Due)
-	c.JSON(http.StatusOK, gin.H{"Id": id})
-}
-
-func (ts *taskServer) getAllTaskHandler(c *gin.Context) {
-	allTasks := ts.store.GetAllTasks()
-	c.JSON(http.StatusOK, allTasks)
-}
-
-func (ts *taskServer) getTaskHandler(c *gin.Context) {
-	id, err := strconv.Atoi(c.Params.ByName("id"))
-	if err != nil {
-		c.String(http.StatusBadRequest, err.Error())
-		return
-	}
-
-	task, err := ts.store.GetTask(id)
-	if err != nil {
-		c.String(http.StatusNotFound, err.Error())
-		return
-	}
-
-	c.JSON(http.StatusOK, task)
-}
-
-func (ts *taskServer) deleteTaskHandler(c *gin.Context) {
-	id, err := strconv.Atoi(c.Params.ByName("id"))
-	if err != nil {
-		c.String(http.StatusBadRequest, err.Error())
-		return
-	}
-
-	if err = ts.store.DeleteTask(id); err != nil {
-		c.String(http.StatusNotFound, err.Error())
-	}
-}
-
-func (ts *taskServer) deleteAllTasksHandler(c *gin.Context) {
-	ts.store.DeleteAllTasks()
-}
-
-func (ts *taskServer) tagHandler(c *gin.Context) {
-	tag := c.Params.ByName("tag")
-
-	tasks := ts.store.GetTaskByTag(tag)
-
-	c.JSON(http.StatusOK, tasks)
-}
-
-func (ts *taskServer) dueHandler(c *gin.Context) {
-	badRequestError := func() {
-		c.String(http.StatusBadRequest, "expect /due/<year>/<month>/<day>, got %v", c.FullPath())
-	}
-
-	year, err := strconv.Atoi(c.Params.ByName("year"))
-	if err != nil {
-		badRequestError()
-		return
-	}
-
-	month, err := strconv.Atoi(c.Params.ByName("month"))
-	if err != nil {
-		badRequestError()
-		return
-	}
-
-	day, err := strconv.Atoi(c.Params.ByName("day"))
-	if err != nil || month < int(time.January) || month > int(time.December) {
-		badRequestError()
-		return
-	}
-
-	tasks := ts.store.GetTaskByDueDate(year, time.Month(month), day)
-	c.JSON(http.StatusOK, tasks)
-}
-
 func renderJSON(w http.ResponseWriter, v interface{}) {
 	js, err := json.Marshal(v)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(js)
 }
 
-func main() {
-	router := gin.Default()
-	server := NewTaskServer()
+func (ts *taskServer) taskHandler(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path == "/task/" {
+		// Request is plain "/task/", without trailing ID.
+		if req.Method == http.MethodPost {
+			ts.createTaskHandler(w, req)
+		} else if req.Method == http.MethodGet {
+			ts.getAllTasksHandler(w, req)
+		} else if req.Method == http.MethodDelete {
+			ts.deleteAllTasksHandler(w, req)
+		} else {
+			http.Error(w, fmt.Sprintf("expect method GET, DELETE or POST at /task/, got %v", req.Method), http.StatusMethodNotAllowed)
+			return
+		}
+	} else {
+		// Request has an ID, as in "/task/<id>".
+		path := strings.Trim(req.URL.Path, "/")
+		pathParts := strings.Split(path, "/")
+		if len(pathParts) < 2 {
+			http.Error(w, "expect /task/<id> in task handler", http.StatusBadRequest)
+			return
+		}
+		id, err := strconv.Atoi(pathParts[1])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
-	router.POST("/task/", server.createTaskHandler)
-	router.GET("/task/", server.getAllTaskHandler)
-	router.DELETE("/task/", server.deleteAllTasksHandler)
-	router.GET("/task/:id", server.getTaskHandler)
-	router.DELETE("/task/:id", server.deleteTaskHandler)
-	router.GET("/tag/:tag", server.tagHandler)
-	router.GET("/due/:year/:month/:day", server.dueHandler)
+		if req.Method == http.MethodDelete {
+			ts.deleteTaskHandler(w, req, int(id))
+		} else if req.Method == http.MethodGet {
+			ts.getTaskHandler(w, req, int(id))
+		} else {
+			http.Error(w, fmt.Sprintf("expect method GET or DELETE at /task/<id>, got %v", req.Method), http.StatusMethodNotAllowed)
+			return
+		}
+	}
+}
+
+func (ts *taskServer) createTaskHandler(w http.ResponseWriter, req *http.Request) {
+	// Types used internally in this handler to (de-)serialize the request and
+	// response from/to JSON.
+	type RequestTask struct {
+		Text string    `json:"text"`
+		Tags []string  `json:"tags"`
+		Due  time.Time `json:"due"`
+	}
+
+	type ResponseId struct {
+		Id int `json:"id"`
+	}
+
+	// Enforce a JSON Content-Type.
+	contentType := req.Header.Get("Content-Type")
+	mediatype, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if mediatype != "application/json" {
+		http.Error(w, "expect application/json Content-Type", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	dec := json.NewDecoder(req.Body)
+	dec.DisallowUnknownFields()
+	var rt RequestTask
+	if err := dec.Decode(&rt); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	id := ts.store.CreateTask(rt.Text, rt.Tags, rt.Due)
+	renderJSON(w, ResponseId{Id: id})
+}
+
+func (ts *taskServer) getAllTasksHandler(w http.ResponseWriter, req *http.Request) {
+	allTasks := ts.store.GetAllTasks()
+	renderJSON(w, allTasks)
+}
+
+func (ts *taskServer) getTaskHandler(w http.ResponseWriter, req *http.Request, id int) {
+	task, err := ts.store.GetTask(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	renderJSON(w, task)
+}
+
+func (ts *taskServer) deleteTaskHandler(w http.ResponseWriter, req *http.Request, id int) {
+	err := ts.store.DeleteTask(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+	}
+}
+
+func (ts *taskServer) deleteAllTasksHandler(w http.ResponseWriter, req *http.Request) {
+	ts.store.DeleteAllTasks()
+}
+
+func (ts *taskServer) tagHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, fmt.Sprintf("expect method GET /tag/<tag>, got %v", req.Method), http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := strings.Trim(req.URL.Path, "/")
+	pathParts := strings.Split(path, "/")
+	if len(pathParts) < 2 {
+		http.Error(w, "expect /tag/<tag> path", http.StatusBadRequest)
+		return
+	}
+	tag := pathParts[1]
+
+	tasks := ts.store.GetTasksByTag(tag)
+	renderJSON(w, tasks)
+}
+
+func (ts *taskServer) dueHandler(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, fmt.Sprintf("expect method GET /due/<date>, got %v", req.Method), http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := strings.Trim(req.URL.Path, "/")
+	pathParts := strings.Split(path, "/")
+
+	badRequestError := func() {
+		http.Error(w, fmt.Sprintf("expect /due/<year>/<month>/<day>, got %v", req.URL.Path), http.StatusBadRequest)
+	}
+	if len(pathParts) != 4 {
+		badRequestError()
+		return
+	}
+
+	year, err := strconv.Atoi(pathParts[1])
+	if err != nil {
+		badRequestError()
+		return
+	}
+	month, err := strconv.Atoi(pathParts[2])
+	if err != nil || month < int(time.January) || month > int(time.December) {
+		badRequestError()
+		return
+	}
+	day, err := strconv.Atoi(pathParts[3])
+	if err != nil {
+		badRequestError()
+		return
+	}
+
+	tasks := ts.store.GetTasksByDueDate(year, time.Month(month), day)
+	renderJSON(w, tasks)
+}
+
+func main() {
+	mux := http.NewServeMux()
+	server := NewTaskServer()
+	mux.HandleFunc("/task/", server.taskHandler)
+	mux.HandleFunc("/tag/", server.tagHandler)
+	mux.HandleFunc("/due/", server.dueHandler)
+
+	handler := middleware.Logging(mux)
+	handler = middleware.PanicRecovery(handler)
+
+	log.Fatal(http.ListenAndServe("localhost:"+os.Getenv("SERVERPORT"), handler))
 }

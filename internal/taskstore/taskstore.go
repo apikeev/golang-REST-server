@@ -98,7 +98,7 @@ func (ts *TaskStore) GetAllTasks() []Task {
 
 
 // GetTaskByTag возвращает задачи с заданным тегом
-func (ts *TaskStore) GetTaskByTag(tag string) []Task {
+func (ts *TaskStore) GetTasksByTag(tag string) []Task {
 	ts.Lock()
 	defer ts.Unlock()
 
@@ -118,7 +118,7 @@ taskloop:
 }
 
 // GetTaskByDueDate возвращает задачи, которые запланированы на заданную дату
-func (ts *TaskStore) GetTaskByDueDate(year int, month time.Month, day int) []Task {
+func (ts *TaskStore) GetTasksByDueDate(year int, month time.Month, day int) []Task {
 	ts.Lock()
 	defer ts.Unlock()
 
